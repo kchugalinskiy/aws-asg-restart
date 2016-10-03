@@ -13,7 +13,7 @@ DELAY=300
 
 
 # Fetch details about the ASG
-ASG_DETAILS=`as-describe-auto-scaling-groups ${AUTOSCALING_GROUP}`
+ASG_DETAILS=`aws autoscaling describe-auto-scaling-instances --output text --query "AutoScalingInstances[?AutoScalingGroupName == '${AUTOSCALING_GROUP}'].{InstanceId:InstanceId}"`
 
 #Check the ASG exists
 if [ "$ASG_DETAILS" == 'No AutoScalingGroups found' ]; then
@@ -24,39 +24,34 @@ fi
 INSTANCES=()
 
 #Get the ELB associated with this ASG
-OIFS="${IFS}"
-NIFS=$'\n'
-IFS="${NIFS}"
 count=0
 for LINE in ${ASG_DETAILS} ; do
-    if [ $count -eq 0 ]; then
-        ELB_NAME=`echo $LINE|awk '{ print $5}'`
-        echo $ELB_NAME
-    else
-        INSTANCENAME=`echo $LINE|awk '{ print $2}'`
-        INSTANCES+=($INSTANCENAME)
-    fi
+    INSTANCEID=$LINE
+    INSTANCES+=( "$LINE" )
     let count=count+1
 done
-IFS="${OIFS}"
 
 # Loop over each instance
 for INSTANCE in ${INSTANCES[@]} ; do
+    echo $INSTANCE
+
+    ELB_NAME=`aws elb describe-load-balancers --output text --query "LoadBalancerDescriptions[? Instances[? InstanceId == '${INSTANCE}']].{LoadBalancerName:LoadBalancerName}"`
+    echo "ELB name = " "$ELB_NAME"
     # Remove instance from ELB
     echo "Removing ${INSTANCE} from ${ELB_NAME}"
-    elb-deregister-instances-from-lb ${ELB_NAME} --instances ${INSTANCE}
+    aws elb deregister-instances-from-load-balancer --load-balancer-name ${ELB_NAME} --instances ${INSTANCE}
     sleep 2
 
-    # Wait for the instance to be removed from ELB
+    # # Wait for the instance to be removed from ELB
     echo "Waiting for ${INSTANCE} to be removed from ${ELB_NAME}"
-    while [ `elb-describe-instance-health ${ELB_NAME} | grep ${INSTANCE} | wc -l` -ne 0 ]; do
+    while [ `aws elb describe-instance-health --load-balancer-name "${ELB_NAME}" --output text --query "InstanceStates[? InstanceId == '${INSTANCE}'].{State:State}"` == "InService" ]; do
         sleep 2
         echo -n '.'
     done
 
     # Terminate the instance
     echo "Terminating ${INSTANCE}"
-    ec2-terminate-instances ${INSTANCE}
+    aws ec2 terminate-instances --instance-ids ${INSTANCE}
 
     # Wait for ASG to recover before killing the next server
     echo "Sleeping for ${DELAY} seconds whilst the ASG recovers"
